@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# launch-mini: Launch any Android package/component into ColorOS 16 top-right mini floating window (state=2)
+# Usage: launch-mini <package_or_component> [optional_url]
+
+set -euo pipefail
+
+TARGET="${1:-com.microsoft.emmx/com.microsoft.ruby.Main}"
+URL="${2:-}"
+RSH="${RSH_CMD:-adb shell}"
+
+# Resolve main activity if only package name is given
+if [[ "$TARGET" != *"/"* ]]; then
+  PKG="$TARGET"
+  COMP=$($RSH "cmd package resolve-activity --brief $PKG | tail -n 1" | tr -d '\r')
+else
+  PKG="${TARGET%%/*}"
+  COMP="$TARGET"
+fi
+
+# Launch with ColorOS flexible windowingMode 100 and mini scale (0.24166666 -> 261x464 on 1080p)
+if [[ -n "$URL" ]]; then
+  $RSH "am start -n $COMP -a android.intent.action.VIEW -d '$URL' --windowingMode 100 --ei androidx.activity.LaunchScenario 1 --ef androidx.activity.LaunchScale 0.24166666" >/dev/null
+else
+  $RSH "am start -n $COMP --windowingMode 100 --ei androidx.activity.LaunchScenario 1 --ef androidx.activity.LaunchScale 0.24166666" >/dev/null
+fi
+
+sleep 0.4
+
+# Pin task bounds to top-right corner (state=2): Rect(759, 120 - 1839, 2040)
+TASK_ID=$($RSH "dumpsys activity activities | grep -E 'Task\{.*A=[0-9]+:$PKG' | head -n 1" | sed -E 's/.*#([0-9]+).*/\1/' | tr -d '\r')
+if [[ -n "$TASK_ID" ]]; then
+  $RSH "cmd activity task resize $TASK_ID 759 120 1839 2040" >/dev/null 2>&1 || true
+  echo "[launch-mini] Pinned $COMP (task #$TASK_ID) to top-right mini window (261x464, state=2)."
+else
+  echo "[launch-mini] Launched $COMP in mini scale mode."
+fi

@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# pc-run: Execute commands on a USB-connected PC from a mobile Linux container via ADB reverse tunnel
+# Automatically re-establishes tunnel within 2 seconds after USB cable replug.
+
+set -euo pipefail
+
+PC_PORT="${PC_BRIDGE_PORT:-18080}"
+CMD="${*:-hostname}"
+
+if ! curl -s --max-time 1 "http://127.0.0.1:${PC_PORT}/ping" >/dev/null 2>&1; then
+  # Re-bind reverse port forwarding if USB was replugged
+  adb reverse "tcp:${PC_PORT}" "tcp:${PC_PORT}" >/dev/null 2>&1 || true
+fi
+
+curl -sS -X POST "http://127.0.0.1:${PC_PORT}/exec" \
+  -H "Content-Type: application/json" \
+  -d "$(python3 -c 'import json,sys; print(json.dumps({"cmd": sys.argv[1]}))' "$CMD")"
