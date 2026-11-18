@@ -1,0 +1,7 @@
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.sh text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+scripts/* text eol=lf
+classroom-usb-kit/phone-side/* text eol=lf

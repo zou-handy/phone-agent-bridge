@@ -1,0 +1,326 @@
+#!/usr/bin/env python3
+"""
+rsh-firewall: Zero-dependency CLI wrapper around Android 13+/16 native
+`cmd connectivity` chain3 (FIREWALL_CHAIN_OEM_DENY_3) kernel eBPF per-UID firewall.
+
+- Zero background daemon, zero APK required, zero Android VpnService slot occupancy.
+- Ideal for air-gapping offline utility apps (calculators, local editors, offline games)
+  directly in kernel `sUidOwnerMap` via `rsh` (`uid=2000` shell).
+- Built-in pre-flight guardrails block accidental lockouts of core system UIDs (< 10000)
+  or essential mobile AI Agent / browser / ADB host packages.
+"""
+
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+
+def resolve_rsh_bin() -> str:
+    env_bin = os.environ.get("RSH_BIN")
+    if env_bin:
+        return env_bin
+    script_sibling = Path(__file__).resolve().parent / "rsh"
+    if script_sibling.is_file() and os.access(script_sibling, os.X_OK):
+        return str(script_sibling)
+    which_rsh = shutil.which("rsh")
+    if which_rsh:
+        return which_rsh
+    return "/usr/local/bin/rsh"
+
+
+RSH_BIN = resolve_rsh_bin()
+CONFIG_DIR = Path(
+    os.environ.get(
+        "RSH_FIREWALL_CONFIG_DIR",
+        os.path.join(os.path.expanduser("~"), ".config", "rsh-firewall"),
+    )
+)
+BLOCKED_FILE = CONFIG_DIR / "blocked_packages.txt"
+
+PKG_RE = re.compile(r"^[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+$")
+
+PROTECTED_PACKAGES = {
+    "com.ai.assistance.operit",
+    "com.termux",
+    "com.microsoft.emmx",
+    "com.android.chrome",
+    "com.chrome.dev",
+    "moe.shizuku.privileged.api",
+    "com.android.shell",
+}
+
+
+def usage() -> None:
+    print(
+        "Usage: rsh-firewall <command> [args]\n"
+        "\n"
+        "Commands:\n"
+        "  status [pkg]     Show chain3 state and persisted blocked packages (+ live kernel state)\n"
+        "  block <pkg>      Enable chain3, block <pkg> in eBPF sUidOwnerMap, persist & verify\n"
+        "  unblock <pkg>    Allow <pkg> networking and remove from blocked_packages.txt\n"
+        "  reapply          Re-apply all persisted packages in blocked_packages.txt after reboot\n"
+        "  off              Disable chain3 immediately (instant emergency bypass)\n"
+        "\n"
+        f"State file: {BLOCKED_FILE}"
+    )
+
+
+def run_rsh(shell_cmd: str, timeout: float = 12.0) -> str:
+    if not os.path.isfile(RSH_BIN) or not os.access(RSH_BIN, os.X_OK):
+        sys.stderr.write(f"Error: rsh binary not found or not executable at {RSH_BIN}\n")
+        sys.exit(1)
+    try:
+        proc = subprocess.run(
+            [RSH_BIN, shell_cmd],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        sys.stderr.write(f"Error: rsh command timed out after {timeout}s\n")
+        sys.exit(1)
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "").strip()
+        sys.stderr.write(f"Error: rsh exited with code {proc.returncode}: {err}\n")
+        sys.exit(proc.returncode)
+    return (proc.stdout or "").replace("\r\n", "\n").strip()
+
+
+def validate_pkg_syntax(pkg: str) -> str:
+    pkg = pkg.strip()
+    if not PKG_RE.match(pkg):
+        sys.stderr.write(f"Error: Invalid Android package name '{pkg}'.\n")
+        sys.exit(2)
+    return pkg
+
+
+def read_persisted_packages() -> list[str]:
+    if not BLOCKED_FILE.exists():
+        return []
+    pkgs: list[str] = []
+    seen: set[str] = set()
+    for raw in BLOCKED_FILE.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if line and PKG_RE.match(line) and line not in seen:
+            pkgs.append(line)
+            seen.add(line)
+    return pkgs
+
+
+def write_persisted_packages(pkgs: list[str]) -> None:
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    unique: list[str] = []
+    seen: set[str] = set()
+    for p in pkgs:
+        if p not in seen:
+            unique.append(p)
+            seen.add(p)
+    content = "".join(f"{p}\n" for p in unique)
+    tmp_path = BLOCKED_FILE.with_suffix(".txt.tmp")
+    tmp_path.write_text(content, encoding="utf-8")
+    tmp_path.replace(BLOCKED_FILE)
+
+
+def get_package_uid(pkg: str) -> int | None:
+    out = run_rsh(f"cmd package list packages -U {pkg}")
+    for line in out.splitlines():
+        m = re.match(r"^package:(\S+)\s+uid:([0-9,]+)\s*$", line.strip())
+        if m and m.group(1) == pkg:
+            return int(m.group(2).split(",")[0])
+    return None
+
+
+def enforce_block_guardrail(pkg: str) -> int:
+    if pkg in PROTECTED_PACKAGES:
+        sys.stderr.write(
+            f"REFUSED [Guardrail]: '{pkg}' is a protected agent/terminal/browser/ADB host package.\n"
+        )
+        sys.exit(3)
+    uid = get_package_uid(pkg)
+    if uid is None:
+        sys.stderr.write(f"Error: Package '{pkg}' is not installed on this device.\n")
+        sys.exit(4)
+    app_id = uid % 100000
+    if uid < 10000 or app_id < 10000:
+        sys.stderr.write(
+            f"REFUSED [Guardrail]: '{pkg}' has core system UID {uid} (< 10000); blocking is forbidden.\n"
+        )
+        sys.exit(3)
+    return uid
+
+
+def cmd_status(extra_args: list[str]) -> None:
+    persisted = read_persisted_packages()
+    inspect_pkg = validate_pkg_syntax(extra_args[0]) if extra_args else None
+
+    query_pkgs = list(persisted)
+    if inspect_pkg and inspect_pkg not in query_pkgs:
+        query_pkgs.append(inspect_pkg)
+
+    cmds = ["cmd connectivity get-chain3-enabled"]
+    for p in query_pkgs:
+        cmds.append(f"cmd connectivity get-package-networking-enabled {p}")
+    raw = run_rsh("; ".join(cmds))
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+
+    chain_line = lines[0] if lines else "unknown"
+    state_map: dict[str, str] = {}
+    for ln in lines[1:]:
+        if ":" in ln:
+            k, v = ln.split(":", 1)
+            state_map[k.strip()] = v.strip()
+
+    chain_active = chain_line == "chain:enabled"
+    chain_note = "ACTIVE (enforcing deny rules)" if chain_active else "DISABLED (passthrough; rules inactive)"
+    print(f"- Kernel eBPF chain3 (FIREWALL_CHAIN_OEM_DENY_3): {chain_line} — {chain_note}")
+    print(f"- Persisted config: {BLOCKED_FILE} ({len(persisted)} package(s))")
+
+    if persisted:
+        for p in persisted:
+            live = state_map.get(p, "unknown")
+            effective = (
+                "BLOCKED"
+                if (chain_active and live == "deny")
+                else f"NOT ENFORCED (chain3={chain_line}, pkg={live})"
+            )
+            print(f"  * {p}: kernel={live} -> {effective}")
+    else:
+        print("  * (no blocked packages persisted)")
+
+    if inspect_pkg and inspect_pkg not in persisted:
+        live = state_map.get(inspect_pkg, "unknown")
+        print(f"- Live inspect [{inspect_pkg}] (not persisted): kernel={live}")
+
+
+def cmd_block(extra_args: list[str]) -> None:
+    if not extra_args:
+        sys.stderr.write("Usage: rsh-firewall block <pkg>\n")
+        sys.exit(2)
+    pkg = validate_pkg_syntax(extra_args[0])
+    uid = enforce_block_guardrail(pkg)
+
+    out = run_rsh(
+        f"cmd connectivity set-chain3-enabled true; "
+        f"cmd connectivity set-package-networking-enabled false {pkg}; "
+        f"cmd connectivity get-chain3-enabled; "
+        f"cmd connectivity get-package-networking-enabled {pkg}"
+    )
+    lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    chain_state = next((ln for ln in lines if ln.startswith("chain:")), "unknown")
+    pkg_state = next((ln for ln in lines if ln.startswith(f"{pkg}:")), "unknown")
+
+    persisted = read_persisted_packages()
+    if pkg not in persisted:
+        persisted.append(pkg)
+    write_persisted_packages(persisted)
+
+    print(f"- Blocked: {pkg} (uid={uid})")
+    print(f"- Verified kernel state: {chain_state}, {pkg_state}")
+    print(f"- Persisted in: {BLOCKED_FILE} ({len(persisted)} total)")
+    if chain_state != "chain:enabled" or pkg_state != f"{pkg}:deny":
+        sys.stderr.write("Error: Kernel verification did not match expected chain:enabled + deny state!\n")
+        sys.exit(1)
+
+
+def cmd_unblock(extra_args: list[str]) -> None:
+    if not extra_args:
+        sys.stderr.write("Usage: rsh-firewall unblock <pkg>\n")
+        sys.exit(2)
+    pkg = validate_pkg_syntax(extra_args[0])
+    uid = get_package_uid(pkg)
+
+    pkg_state = "(package not currently installed)"
+    if uid is not None:
+        out = run_rsh(
+            f"cmd connectivity set-package-networking-enabled true {pkg}; "
+            f"cmd connectivity get-package-networking-enabled {pkg}"
+        )
+        lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+        pkg_state = next((ln for ln in lines if ln.startswith(f"{pkg}:")), out)
+
+    persisted = [p for p in read_persisted_packages() if p != pkg]
+    write_persisted_packages(persisted)
+
+    print(f"- Unblocked: {pkg}" + (f" (uid={uid})" if uid is not None else ""))
+    print(f"- Verified kernel state: {pkg_state}")
+    print(f"- Remaining persisted packages in {BLOCKED_FILE}: {len(persisted)}")
+
+
+def cmd_reapply() -> None:
+    persisted = read_persisted_packages()
+    if not persisted:
+        print(f"- Nothing to reapply: {BLOCKED_FILE} has 0 packages (chain3 left unchanged).")
+        return
+
+    valid_pkgs: list[tuple[str, int]] = []
+    for pkg in persisted:
+        if pkg in PROTECTED_PACKAGES:
+            print(f"- Skipping protected package '{pkg}' (guardrail)")
+            continue
+        uid = get_package_uid(pkg)
+        if uid is None:
+            print(f"- Skipping uninstalled package '{pkg}'")
+            continue
+        if uid < 10000 or (uid % 100000) < 10000:
+            print(f"- Skipping core system package '{pkg}' (uid={uid} < 10000)")
+            continue
+        valid_pkgs.append((pkg, uid))
+
+    if not valid_pkgs:
+        print("- No valid blockable user packages found to reapply.")
+        return
+
+    cmds = ["cmd connectivity set-chain3-enabled true"]
+    for pkg, _ in valid_pkgs:
+        cmds.append(f"cmd connectivity set-package-networking-enabled false {pkg}")
+    cmds.append("cmd connectivity get-chain3-enabled")
+    for pkg, _ in valid_pkgs:
+        cmds.append(f"cmd connectivity get-package-networking-enabled {pkg}")
+
+    out = run_rsh("; ".join(cmds))
+    lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    chain_state = next((ln for ln in lines if ln.startswith("chain:")), "unknown")
+    print(f"- Reapplied chain3 firewall: {chain_state} ({len(valid_pkgs)} package(s))")
+    for pkg, uid in valid_pkgs:
+        pkg_state = next((ln for ln in lines if ln.startswith(f"{pkg}:")), "unknown")
+        print(f"  * {pkg} (uid={uid}): {pkg_state}")
+
+
+def cmd_off() -> None:
+    out = run_rsh("cmd connectivity set-chain3-enabled false; cmd connectivity get-chain3-enabled")
+    lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    chain_state = next((ln for ln in lines if ln.startswith("chain:")), out)
+    persisted = read_persisted_packages()
+    print(f"- Emergency bypass complete: {chain_state} (all chain3 rules inactive)")
+    print(f"- Preserved {len(persisted)} package(s) in {BLOCKED_FILE} (run 'rsh-firewall reapply' to restore)")
+
+
+def main() -> None:
+    args = sys.argv[1:]
+    if not args or args[0] in ("-h", "--help", "help"):
+        usage()
+        return
+
+    sub = args[0]
+    rest = args[1:]
+    if sub == "status":
+        cmd_status(rest)
+    elif sub == "block":
+        cmd_block(rest)
+    elif sub == "unblock":
+        cmd_unblock(rest)
+    elif sub == "reapply":
+        cmd_reapply()
+    elif sub == "off":
+        cmd_off()
+    else:
+        sys.stderr.write(f"Error: Unknown subcommand '{sub}'.\n\n")
+        usage()
+        sys.exit(2)
+
+
+if __name__ == "__main__":
+    main()

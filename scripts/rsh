@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# rsh: Zero-overhead local loopback ADB shell wrapper for Android PRoot / Termux / DSH-Go / Operit.
+# Connects to local wireless/Shizuku adbd (127.0.0.1:5555) and defaults to `-T` (ADB shell,v2,raw)
+# for non-interactive commands so stdout/stderr never suffer PTY `\r\n` line-ending corruption.
+
+set -e
+
+DEVS=$(adb devices 2>/dev/null || true)
+
+case "$DEVS" in
+    *$'\n'127.0.0.1:5555$'\t'device*)
+        TARGET="127.0.0.1:5555"
+        ;;
+    *$'\n'emulator-5554$'\t'device*)
+        TARGET="emulator-5554"
+        ;;
+    *)
+        adb connect 127.0.0.1:5555 >/dev/null 2>&1 || true
+        DEVS=$(adb devices 2>/dev/null || true)
+        case "$DEVS" in
+            *$'\n'emulator-5554$'\t'device*) TARGET="emulator-5554" ;;
+            *) TARGET="127.0.0.1:5555" ;;
+        esac
+        ;;
+esac
+
+if [ $# -eq 0 ]; then
+    if [ -t 0 ] && [ -t 1 ]; then
+        exec adb -s "$TARGET" shell
+    else
+        exec adb -s "$TARGET" shell -T
+    fi
+fi
+
+case "$1" in
+    -t|-tt|-T|-n|-x|-e)
+        exec adb -s "$TARGET" shell "$@"
+        ;;
+    *)
+        exec adb -s "$TARGET" shell -T "$@"
+        ;;
+esac

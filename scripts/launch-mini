@@ -4,30 +4,46 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET="${1:-com.microsoft.emmx/com.microsoft.ruby.Main}"
 URL="${2:-}"
-RSH="${RSH_CMD:-adb shell}"
+
+if [[ -n "${RSH_CMD:-}" ]]; then
+  RSH="$RSH_CMD"
+elif [[ -x "$SCRIPT_DIR/rsh" ]]; then
+  RSH="$SCRIPT_DIR/rsh"
+elif command -v rsh >/dev/null 2>&1; then
+  RSH="rsh"
+else
+  RSH="adb shell"
+fi
 
 # Resolve main activity if only package name is given
 if [[ "$TARGET" != *"/"* ]]; then
   PKG="$TARGET"
-  COMP=$($RSH "cmd package resolve-activity --brief $PKG | tail -n 1" | tr -d '\r')
+  COMP=$($RSH "cmd package resolve-activity --brief -c android.intent.category.LAUNCHER $PKG | tail -n 1" | tr -d '\r')
 else
   PKG="${TARGET%%/*}"
   COMP="$TARGET"
 fi
 
-# Launch with ColorOS flexible windowingMode 100 and mini scale (0.24166666 -> 261x464 on 1080p)
+# Pre-pin existing task bounds if present
+TASK_ID=$($RSH "dumpsys activity activities | grep -E 'Task\{.*#[0-9]+.*A=[0-9]+:$PKG' | head -n 1" | sed -E 's/.*#([0-9]+).*/\1/' | tr -d '\r' || true)
+if [[ -n "$TASK_ID" ]]; then
+  $RSH "cmd activity task resize $TASK_ID 759 120 1839 2040" >/dev/null 2>&1 || true
+fi
+
+# Launch with ColorOS 16 FlexibleTaskController windowingMode 100 and mini scale (0.24166666 -> 261x464 on 1080p)
 if [[ -n "$URL" ]]; then
-  $RSH "am start -n $COMP -a android.intent.action.VIEW -d '$URL' --windowingMode 100 --ei androidx.activity.LaunchScenario 1 --ef androidx.activity.LaunchScale 0.24166666" >/dev/null
+  $RSH "am start -n '$COMP' -a android.intent.action.VIEW -d '$URL' --windowingMode 100 --ei androidx.activity.LaunchScenario 1 --ef androidx.activity.LaunchScale 0.24166666" >/dev/null
 else
-  $RSH "am start -n $COMP --windowingMode 100 --ei androidx.activity.LaunchScenario 1 --ef androidx.activity.LaunchScale 0.24166666" >/dev/null
+  $RSH "am start -n '$COMP' --windowingMode 100 --ei androidx.activity.LaunchScenario 1 --ef androidx.activity.LaunchScale 0.24166666" >/dev/null
 fi
 
 sleep 0.4
 
 # Pin task bounds to top-right corner (state=2): Rect(759, 120 - 1839, 2040)
-TASK_ID=$($RSH "dumpsys activity activities | grep -E 'Task\{.*A=[0-9]+:$PKG' | head -n 1" | sed -E 's/.*#([0-9]+).*/\1/' | tr -d '\r')
+TASK_ID=$($RSH "dumpsys activity activities | grep -E 'Task\{.*#[0-9]+.*A=[0-9]+:$PKG' | head -n 1" | sed -E 's/.*#([0-9]+).*/\1/' | tr -d '\r' || true)
 if [[ -n "$TASK_ID" ]]; then
   $RSH "cmd activity task resize $TASK_ID 759 120 1839 2040" >/dev/null 2>&1 || true
   echo "[launch-mini] Pinned $COMP (task #$TASK_ID) to top-right mini window (261x464, state=2)."
