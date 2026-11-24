@@ -1,0 +1,15 @@
+name = "classroom-portal-mcp"
+main = "worker.js"
+compatibility_date = "2026-11-01"
+
+# IMPORTANT FOR MAINLAND CHINA CLASSROOMS:
+# Bind a custom domain in Cloudflare Dashboard -> Workers -> Custom Domains
+# (Default *.workers.dev is DNS-poisoned in Mainland China; custom domain :443 works without proxy)
+
+[[durable_objects.bindings]]
+name = "PORTAL_HUB"
+class_name = "PortalHubDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["PortalHubDO"]
