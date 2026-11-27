@@ -547,7 +547,28 @@ class PortalRequestHandler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Expose-Headers", "Mcp-Session-Id")
             self.send_header("Access-Control-Max-Age", "86400")
 
+    def parse_request(self):
+        self._body_drained = False
+        return super().parse_request()
+
     def _send_bytes(self, status: int, content_type: str, body: bytes, extra_headers: dict = None, path_for_cors: str = ""):
+        # CRITICAL HTTP/1.1 Keep-Alive guard: always drain small unread request bodies (e.g. `{}` from
+        # `.NET HttpWebRequest` / Cloudflare Tunnel pooling) before replying, otherwise leftover bytes
+        # corrupt the next request line on the reused socket (`{}POST /limb/reply` -> 501)!
+        if not getattr(self, "_body_drained", False):
+            try:
+                clen = int(self.headers.get("Content-Length") or "0")
+            except ValueError:
+                clen = -1
+            if 0 < clen <= 65536:
+                try:
+                    self.rfile.read(clen)
+                    self._body_drained = True
+                except Exception:
+                    self.close_connection = True
+            elif clen > 65536 or clen < 0 or self.headers.get("Transfer-Encoding"):
+                self.close_connection = True
+
         self.send_response(status)
         if path_for_cors:
             self._set_cors(path_for_cors)
@@ -566,9 +587,13 @@ class PortalRequestHandler(BaseHTTPRequestHandler):
         self._send_bytes(status, "application/json; charset=utf-8", raw, extra_headers=extra_headers, path_for_cors=path_for_cors)
 
     def _read_body(self, max_bytes: int = MAX_JSON_BYTES) -> bytes:
+        if getattr(self, "_body_drained", False):
+            return b""
         clen = int(self.headers.get("Content-Length") or "0")
         if clen < 0 or clen > max_bytes:
+            self.close_connection = True
             raise ValueError(f"Payload exceeds limit ({max_bytes} bytes)")
+        self._body_drained = True
         return self.rfile.read(clen) if clen > 0 else b""
 
     def _extract_bearer(self, path: str, qs: dict) -> str:
@@ -716,6 +741,7 @@ class PortalRequestHandler(BaseHTTPRequestHandler):
             return self._send_json(200, reg)
 
         if path == "/limb/poll":
+            self._read_body(4096)
             secret = (self.headers.get("X-Limb-Secret") or "").strip()
             res = self.hub.limb_poll(secret)
             code = 200 if res.get("ok") else 404
@@ -731,6 +757,7 @@ class PortalRequestHandler(BaseHTTPRequestHandler):
             return self._send_json(200 if ok else 404, {"ok": ok})
 
         if path == "/limb/disconnect":
+            self._read_body(4096)
             secret = (self.headers.get("X-Limb-Secret") or "").strip()
             ok = self.hub.limb_disconnect(secret)
             return self._send_json(200, {"ok": ok})

@@ -2,6 +2,7 @@
 """End-to-end verification suite for Classroom Portal MCP."""
 import base64
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -204,7 +205,41 @@ def main():
         assert st_get == 200 and dl_bytes == sample_bytes
         print("[PASS 6] All 5 MCP tools + zero-BOM binary /files/ roundtrip verified")
 
-        # 7. Disconnect classroom Limb -> room & token immediately wiped (0 residue!)
+        # 7. HTTP/1.1 Keep-Alive regression test: unread `{}` body on /limb/poll must not corrupt next request
+        ka_conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        try:
+            ka_conn.request(
+                "POST",
+                "/limb/poll",
+                body=b"{}",
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Limb-Secret": "invalid_secret_for_ka_test",
+                    "Connection": "keep-alive",
+                },
+            )
+            r_ka1 = ka_conn.getresponse()
+            r_ka1.read()
+            assert r_ka1.status == 404, f"Expected 404 on invalid poll secret, got {r_ka1.status}"
+
+            ka_conn.request(
+                "POST",
+                "/limb/reply",
+                body=b'{"task_id":"none","result":{}}',
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Limb-Secret": "invalid_secret_for_ka_test",
+                    "Connection": "keep-alive",
+                },
+            )
+            r_ka2 = ka_conn.getresponse()
+            r_ka2.read()
+            assert r_ka2.status == 404, f"Keep-Alive desync! Expected 404 (not 501), got {r_ka2.status}"
+        finally:
+            ka_conn.close()
+        print("[PASS 7] HTTP/1.1 Keep-Alive request-body drain verified (no {}POST desync)")
+
+        # 8. Disconnect classroom Limb -> room & token immediately wiped (0 residue!)
         limb_proc.terminate()
         limb_proc.wait(timeout=5)
         time.sleep(0.2)
@@ -215,7 +250,7 @@ def main():
             headers=mcp_hdrs,
         )
         assert st_after == 401, f"Expected 401 after Limb window close, got {st_after}"
-        print("[PASS 7] Instant room & token self-destruct on window close verified (0 residue)")
+        print("[PASS 8] Instant room & token self-destruct on window close verified (0 residue)")
         print("ALL_E2E_TESTS_PASSED")
     finally:
         if limb_proc.poll() is None:

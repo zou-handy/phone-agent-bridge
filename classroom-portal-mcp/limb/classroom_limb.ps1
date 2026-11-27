@@ -6,6 +6,7 @@
 #   4) Pure RAM background job table + finally tree-kill -> closing window leaves 0 residue
 
 $ErrorActionPreference = "Continue"
+$ProgressPreference = "SilentlyContinue"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
@@ -63,7 +64,7 @@ function Invoke-HubJson([string]$Method, [string]$Path, [hashtable]$Headers, $Bo
 
 function Build-PowerShellEncoded([string]$CmdText, [string]$WorkDir) {
     $safeCwd = $WorkDir.Replace("'", "''")
-    $runner = "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; `$OutputEncoding = [System.Text.Encoding]::UTF8; Set-Location -LiteralPath '" + $safeCwd + "'; " + $CmdText
+    $runner = "`$ProgressPreference = 'SilentlyContinue'; [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; `$OutputEncoding = [System.Text.Encoding]::UTF8; Set-Location -LiteralPath '" + $safeCwd + "'; " + $CmdText
     return [System.Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($runner))
 }
 
