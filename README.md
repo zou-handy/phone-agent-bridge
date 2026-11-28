@@ -199,6 +199,15 @@ phone-agent-bridge/
 
 ---
 
+## 🙏 致谢与架构灵感 (Acknowledgments)
+
+`classroom-portal-mcp/` 模块由本项目使用 **Python 3.12 标准库**与 **纯 ASCII Windows PowerShell 5.1** 从零独立实现（100% Clean-Room 零第三方依赖重写），在协议与交互形态设计上致谢以下优秀的海外开源项目启发：
+
+- **[mrkaylabs/easy-mcp](https://github.com/mrkaylabs/easy-mcp)**（MIT）：启发了基于 OAuth 2.0 动态客户端注册（RFC 7591 / 8414 / 9728 + PKCE `S256`）兼容网页端 AI 连接器的交互思路；本项目在此基础上专门增设了**屏幕实时 6 位一次性配对码安全门禁（5 次防爆破自动轮换 + 关窗即毁）**以消除未授权远控风险。
+- **[s3hq4y/portal](https://github.com/s3hq4y/portal)**：启发了极简 5 工具 MCP 接口面与将二进制文件传输剥离到 JSON-RPC 之外独立 HTTP 通道的清爽设计理念。
+
+---
+
 ## 📄 开源协议
 
 本项目基于 [MIT License](LICENSE) 开源。  
