@@ -1170,12 +1170,21 @@ class PortalRequestHandler(BaseHTTPRequestHandler):
                     return self._send_json(404, res, path_for_cors=path)
                 raw_bytes = base64.b64decode(res.get("data_b64") or "")
                 fname = os.path.basename(target_path.replace("\\", "/")) or "download.bin"
+                ascii_fname = "".join(
+                    ch if (32 <= ord(ch) < 127 and ch not in ('"', "\\", ";")) else "_"
+                    for ch in fname
+                ).strip("_") or "download.bin"
+                if ascii_fname == fname:
+                    cd_val = f'attachment; filename="{ascii_fname}"'
+                else:
+                    utf8_fname = urllib.parse.quote(fname, safe="")
+                    cd_val = f"attachment; filename=\"{ascii_fname}\"; filename*=UTF-8''{utf8_fname}"
                 return self._send_bytes(
                     200,
                     "application/octet-stream",
                     raw_bytes,
                     extra_headers={
-                        "Content-Disposition": f'attachment; filename="{fname}"',
+                        "Content-Disposition": cd_val,
                         "X-SHA256": hashlib.sha256(raw_bytes).hexdigest(),
                     },
                     path_for_cors=path,

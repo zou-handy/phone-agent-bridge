@@ -203,7 +203,17 @@ def main():
         assert st_put == 200
         st_get, _, dl_bytes = req_raw(f"{fbase}/?path=lab_report.bin", method="GET")
         assert st_get == 200 and dl_bytes == sample_bytes
-        print("[PASS 6] All 5 MCP tools + zero-BOM binary /files/ roundtrip verified")
+
+        # Non-ASCII Chinese filename PUT + GET roundtrip (RFC 5987 Content-Disposition latin-1 regression check)
+        cn_name = "实验报告_数据库实训(终版).docx"
+        cn_q = urllib.parse.quote(cn_name)
+        st_put_cn, _, _ = req_raw(f"{fbase}/?path={cn_q}", method="PUT", data=sample_bytes)
+        assert st_put_cn == 200
+        cn_b64 = base64.b64encode(cn_name.encode("utf-8")).decode("ascii")
+        st_get_cn, hdrs_cn, dl_cn = req_raw(f"{fbase}/", method="GET", headers={"X-Target-Path-B64": cn_b64})
+        cd_cn = hdrs_cn.get("Content-Disposition") or hdrs_cn.get("content-disposition") or ""
+        assert st_get_cn == 200 and dl_cn == sample_bytes and "filename*=UTF-8''" in cd_cn, f"CN GET failed: {st_get_cn} {cd_cn}"
+        print("[PASS 6] All 5 MCP tools + zero-BOM binary /files/ (ASCII + Chinese UTF-8 filename) roundtrip verified")
 
         # 7. HTTP/1.1 Keep-Alive regression test: unread `{}` body on /limb/poll must not corrupt next request
         ka_conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
