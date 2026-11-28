@@ -1,18 +1,41 @@
 # Phone Agent Bridge (`phone-agent-bridge`)
 
-> **把大脑和私人凭据 100% 锁在兜里的手机上，让机房/办公公用电脑变成「插线即用、拔线失忆」的高速外接肢体——面向 Operit / DSH-Go / Termux / Claude Code / Antigravity 玩家的跨端桥接武器库**
+> **不装软件、不登账号、不用公网 IP：敲一条命令让教室公用电脑变成「听令干活、关窗失忆」的临时外肢——同时支持「手机豆包（工作模式）/ WorkBuddy / Claude Code `:443` 六位配对码免线接管」与「充电线 `10ms` 离线回环直连」**
 
 [![Release v1.0.0](https://img.shields.io/badge/Release-v1.0.0%20(3.9MB%20Ready--to--Use%20Zip)-16a34a?style=flat-square)](https://github.com/zou-handy/phone-agent-bridge/releases/tag/v1.0.0)
 [![License: MIT](https://img.shields.io/badge/License-MIT-2563eb?style=flat-square)](LICENSE)
-[![Agents](https://img.shields.io/badge/Agents-Operit%20%7C%20DSH--Go%20%7C%20Termux%20%7C%20Claude%20Code%20%7C%20AGY-7c3aed?style=flat-square)](#)
-[![Platform](https://img.shields.io/badge/Platform-Android%2013--16%20%7C%20ColorOS%2016%20%7C%20Windows%2010%2F11-0d9488?style=flat-square)](#)
+[![Agents](https://img.shields.io/badge/Agents-豆包工作模式%20%7C%20WorkBuddy%20%7C%20Claude%20Code%20%7C%20Operit%20%7C%20DSH--Go%20%7C%20AGY-7c3aed?style=flat-square)](#)
+[![Platform](https://img.shields.io/badge/Platform-Windows%2010%2F11%20%7C%20Linux%20%7C%20macOS%20%7C%20Android%2013--16-0d9488?style=flat-square)](#)
 
-**一键离线包直链（内置官方 `adb.exe`，`3.9 MB`，揣进手机就能去上课）**：  
+---
+
+## 零、免数据线主打：一条命令 + 一次性 6 位配对码远程接管电脑 (`classroom-portal-mcp/`)
+
+专为**大学生上机实验课 / 借用教室公用电脑**设计：不想背五斤电脑，又不敢在公用机装远控、扫码留微信/GitHub 登录态？
+
+- **纯内存零残留**：被控电脑按 `Win + R` 运行一行 PowerShell 命令（`irm https://.../go | iex`），脚本纯内存驻留、不落盘任何文件、不触发 UAC 或防火墙弹窗，当场弹出**一次性 6 位配对码**；下课关掉黑框，房间与令牌瞬间销毁（`HTTP 401`）。
+- **一机一码同时多控 + 自有短域名**：内置多房间隔离（`rooms`），每台电脑敲一行命令各领独立配对码，一个 AI 可同时调度多台 Windows / Mac / Linux；支持 `$0` 免域名隧道（`localhost.run` / `cloudflared`），也提供 [`cloudflare/worker.js`](classroom-portal-mcp/cloudflare/worker.js) 绑定自有短域名 24h 常驻。
+- **自带上机课实战 [`SKILL.md`](classroom-portal-mcp/SKILL.md)（防抢鼠标 + 防还原 + 锁固定比例 Computer Use）**：AI 自动习得后台命令行静默执行（`0%` 抢鼠标）、自动写 `D:\` 防 C 盘影子还原、`Get-Content -Encoding UTF8 -LiteralPath` 零乱码，以及操作桌面软件（如数据库 IDE）前先按 `restore -> moveTo -> resizeTo` 锁死固定窗口比例再做 `Computer Use` 精准点击，不怕点歪（踩坑全集见 [`WINDOWS_VDI_PITFALLS.md`](classroom-portal-mcp/WINDOWS_VDI_PITFALLS.md)）。
+
+### 🚀 30 秒零门槛实测：复制下面这段话发给「手机豆包（切到工作模式）」或 WorkBuddy / Claude Code
+
+无需购买服务器，甚至无需在手机上装任何终端环境——直接打开**手机豆包 App（切到「工作」模式）**、电脑端 **WorkBuddy** 或 **Claude Code / Antigravity**，整段粘贴发送即可：
+
+```text
+请帮我用开源项目 https://github.com/zou-handy/phone-agent-bridge 远程接管我的电脑：
+1. 在你的终端拉取该仓库（若 GitHub 直连慢可加 https://ghfast.top/ 前缀），先完整阅读 classroom-portal-mcp/SKILL.md 并严守里面的安全、UTF-8 编码与固定窗口比例规范；
+2. 后台启动 python3 classroom-portal-mcp/hub_server.py --host 127.0.0.1 --port 8787 --pidfile /tmp/classroom_portal_hub.pid，然后按 SKILL.md Step 1 打开 https 443 隧道（云沙箱/豆包环境直接用免下载的 ssh -o StrictHostKeyChecking=no -R 80:127.0.0.1:8787 nokey@localhost.run 轮询日志拿 https://*.lhr.life 地址；本地电脑环境可用 cloudflared）并验证 /health 正常；
+3. 把生成的 Windows Win+R 一行命令（或 Mac/Linux 命令）发给我运行，等我回复电脑屏幕弹出的 6 位配对码后调用 http://127.0.0.1:8787/pair 完成绑定，听我指令操作电脑（结束时用 hub_server.py --stop 安全收尾）。
+```
+
+---
+
+**如果机房断外网或你随身带了充电线，也可直接使用下方 `10ms` 离线 USB 套件（内置官方 `adb.exe`，`3.9 MB`）**：  
 👉 **[下载 `Classroom_USB_Kit_v1.0.0.zip` (GitHub Releases)](https://github.com/zou-handy/phone-agent-bridge/releases/download/v1.0.0/Classroom_USB_Kit_v1.0.0.zip)**
 
 ---
 
-## 一、核心主打：公用机房电脑「一线零登录反控」(`classroom-usb-kit/`)
+## 一、离线双模搭档：公用机房电脑「充电线 10ms 零登录反控」(`classroom-usb-kit/`)
 
 ### 1. 真实痛点：上机课的「五斤板砖 vs 裸奔社死」两难
 

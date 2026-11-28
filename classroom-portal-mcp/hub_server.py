@@ -13,12 +13,14 @@ Combines three designs into one cohesive zero-residue bridge:
 """
 import argparse
 import base64
+import errno
 import hashlib
 import hmac
 import html
 import json
 import os
 import secrets
+import signal
 import threading
 import time
 import urllib.parse
@@ -43,17 +45,19 @@ PORTAL_TOOLS = [
         "name": "run_command",
         "description": (
             "Run a foreground shell command on the paired classroom computer (default timeout 120s, max 600s). "
-            "Uses UTF-8 Base64 encoding and async stream reading on Windows to avoid CP936 quote issues and 4KB pipe deadlocks."
+            "Uses UTF-8 Base64 encoding and async stream reading on Windows to avoid CP936 quote issues and 4KB pipe deadlocks. "
+            "IMPORTANT on Windows: ALWAYS keep default `powershell` (do NOT pass `shell: 'cmd'` to chain statements — cmd.exe treats `;` literally). "
+            "When reading UTF-8 files in PowerShell 5.1, ALWAYS add `-Encoding UTF8 -LiteralPath` (e.g. `Get-Content -Encoding UTF8 -LiteralPath ...`)."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "command": {"type": "string", "description": "Command string to execute."},
+                "command": {"type": "string", "description": "Command string to execute (on Windows use PowerShell + Write-Output; pass -Encoding UTF8 -LiteralPath to Get-Content)."},
                 "cwd": {"type": "string", "description": "Working directory (defaults to D:\\ on Windows or workspace root)."},
                 "shell": {
                     "type": "string",
                     "enum": ["powershell", "pwsh", "cmd", "bash", "sh"],
-                    "description": "Shell to use (default: powershell on Windows, bash/sh on POSIX).",
+                    "description": "Shell to use (default: powershell on Windows, bash/sh on POSIX; avoid cmd for multi-statement commands).",
                 },
                 "timeout_sec": {
                     "type": "integer",
@@ -68,7 +72,7 @@ PORTAL_TOOLS = [
     },
     {
         "name": "start_command",
-        "description": "Start a long-running background process on the paired classroom computer (max 4 concurrent jobs). Returns command_id and pid.",
+        "description": "Start a long-running background process on the paired classroom computer (max 4 concurrent jobs). Returns command_id and pid. On Windows keep default `powershell`.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -118,7 +122,7 @@ PORTAL_TOOLS = [
 
 DEFAULT_INSTRUCTIONS = (
     "Connected to a zero-residue classroom computer via Classroom Portal MCP (5 minimal tools + HTTP file API).\n"
-    "- Use `run_command` for foreground commands (SQL, Python, docx generation, screenshots).\n"
+    "- Use `run_command` for foreground commands (on Windows keep default `powershell` + `Write-Output`; NEVER pass `shell: 'cmd'` for multi-line statements; ALWAYS pass `-Encoding UTF8 -LiteralPath` to `Get-Content` / `Select-String` / `Import-Csv`).\n"
     "- Use `start_command` / `read_command` / `stop_command` for background servers or watchers.\n"
     "- Use `file_transfer_info` to get the HTTP `/files/<token>/<path>` endpoints for binary uploads/downloads (.docx, .jpg, .zip).\n"
     "- All state lives strictly in RAM and self-destructs when the classroom window closes."
@@ -170,7 +174,9 @@ class HubState:
     def __init__(self, public_base_url: str = ""):
         self.lock = threading.RLock()
         self.cond = threading.Condition(self.lock)
-        self.public_base_url = public_base_url.rstrip("/")
+        cleaned = (public_base_url or "").strip().rstrip("/")
+        self.public_base_url = "" if cleaned.lower() == "auto" else cleaned
+        self.last_seen_public_url = ""
         self.csrf_key = secrets.token_hex(32)
 
         self.rooms: dict[str, dict] = {}          # room_id -> room dict
@@ -182,11 +188,41 @@ class HubState:
         self.tokens: dict[str, dict] = {}         # sha256(token) -> {type, room_id, client_id, exp, raw_file_tok}
         self.ip_failures: dict[str, list[float]] = {}  # ip -> timestamps of recent PIN failures
 
-    def base_url_for(self, host_header: str) -> str:
+    @staticmethod
+    def _is_local_host(host: str) -> bool:
+        if not host:
+            return True
+        h = host.split("/")[0].strip().lower()
+        if h.startswith("["):
+            h_only = h.split("]")[0] + "]"
+        else:
+            h_only = h.split(":")[0]
+        return h_only in ("127.0.0.1", "localhost", "[::1]", "::1", "0.0.0.0")
+
+    def base_url_for(self, host_header: str, x_forwarded_host: str = "", x_forwarded_proto: str = "") -> str:
+        xfh = (x_forwarded_host or "").split(",")[0].strip()
+        raw_host = xfh or (host_header or "").split(",")[0].strip()
+        xfp = (x_forwarded_proto or "").split(",")[0].strip().lower()
+
+        if raw_host and not self._is_local_host(raw_host):
+            scheme = xfp if xfp in ("https", "http") else "https"
+            live_url = f"{scheme}://{raw_host}"
+            with self.lock:
+                self.last_seen_public_url = live_url
+            if not self.public_base_url:
+                return live_url
+            # Seamlessly follow rotating ephemeral tunnel hostnames (localhost.run / trycloudflare / pinggy)
+            if any(ep in self.public_base_url.lower() for ep in (".lhr.life", ".localhost.run", ".trycloudflare.com", "pinggy")):
+                return live_url
+            return self.public_base_url
+
         if self.public_base_url:
             return self.public_base_url
-        host = (host_header or "127.0.0.1:8787").strip()
-        scheme = "http" if host.startswith(("127.0.0.1", "localhost", "[::1]")) else "https"
+        with self.lock:
+            if self.last_seen_public_url:
+                return self.last_seen_public_url
+        host = raw_host or "127.0.0.1:8787"
+        scheme = xfp if xfp in ("https", "http") else ("http" if self._is_local_host(host) else "https")
         return f"{scheme}://{host}"
 
     def make_csrf(self, bind_str: str) -> str:
@@ -551,7 +587,22 @@ class PortalRequestHandler(BaseHTTPRequestHandler):
         self._body_drained = False
         return super().parse_request()
 
-    def _send_bytes(self, status: int, content_type: str, body: bytes, extra_headers: dict = None, path_for_cors: str = ""):
+    def _req_base(self) -> str:
+        return self.hub.base_url_for(
+            self.headers.get("Host", ""),
+            self.headers.get("X-Forwarded-Host", ""),
+            self.headers.get("X-Forwarded-Proto", ""),
+        )
+
+    def _send_bytes(
+        self,
+        status: int,
+        content_type: str,
+        body: bytes,
+        extra_headers: dict = None,
+        path_for_cors: str = "",
+        close_conn: bool = False,
+    ):
         # CRITICAL HTTP/1.1 Keep-Alive guard: always drain small unread request bodies (e.g. `{}` from
         # `.NET HttpWebRequest` / Cloudflare Tunnel pooling) before replying, otherwise leftover bytes
         # corrupt the next request line on the reused socket (`{}POST /limb/reply` -> 501)!
@@ -569,22 +620,47 @@ class PortalRequestHandler(BaseHTTPRequestHandler):
             elif clen > 65536 or clen < 0 or self.headers.get("Transfer-Encoding"):
                 self.close_connection = True
 
-        self.send_response(status)
-        if path_for_cors:
-            self._set_cors(path_for_cors)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        if extra_headers:
-            for k, v in extra_headers.items():
-                self.send_header(k, v)
-        self.end_headers()
-        if self.command != "HEAD":
-            self.wfile.write(body)
+        if close_conn:
+            self.close_connection = True
 
-    def _send_json(self, status: int, obj: dict, extra_headers: dict = None, path_for_cors: str = ""):
+        try:
+            self.send_response(status)
+            if path_for_cors:
+                self._set_cors(path_for_cors)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            if getattr(self, "close_connection", False):
+                self.send_header("Connection", "close")
+            if extra_headers:
+                for k, v in extra_headers.items():
+                    self.send_header(k, v)
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(body)
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
+        except Exception:
+            pass
+
+    def _send_json(
+        self,
+        status: int,
+        obj: dict,
+        extra_headers: dict = None,
+        path_for_cors: str = "",
+        close_conn: bool = False,
+    ):
         raw = json.dumps(obj, ensure_ascii=False).encode("utf-8")
-        self._send_bytes(status, "application/json; charset=utf-8", raw, extra_headers=extra_headers, path_for_cors=path_for_cors)
+        self._send_bytes(
+            status,
+            "application/json; charset=utf-8",
+            raw,
+            extra_headers=extra_headers,
+            path_for_cors=path_for_cors,
+            close_conn=close_conn,
+        )
 
     def _read_body(self, max_bytes: int = MAX_JSON_BYTES) -> bytes:
         if getattr(self, "_body_drained", False):
@@ -615,25 +691,26 @@ class PortalRequestHandler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         qs = urllib.parse.parse_qs(parsed.query)
-        base = self.hub.base_url_for(self.headers.get("Host", ""))
+        base = self._req_base()
 
         # 1. Health & Bootstrap Scripts (`/go` for Windows PowerShell, `/go.py` for POSIX)
+        # Send `Connection: close` + immediate flush so tunnels like Pinggy / localhost.run never stall
         if path == "/health":
             with self.hub.lock:
                 self.hub.gc_locked()
                 active_rooms = len(self.hub.rooms)
-            return self._send_json(200, {"ok": True, "service": SERVER_INFO["name"], "activeRooms": active_rooms})
+            return self._send_json(200, {"ok": True, "service": SERVER_INFO["name"], "activeRooms": active_rooms}, close_conn=True)
 
         if path == "/go":
             ps_tpl = LIMB_PS1_PATH.read_text("ascii")
             # Inject current Hub base URL as default while keeping 100% pure ASCII + CRLF!
             ps_code = ps_tpl.replace("__DEFAULT_HUB_URL__", base).replace("\r\n", "\n").replace("\n", "\r\n")
-            return self._send_bytes(200, "text/plain; charset=us-ascii", ps_code.encode("ascii"))
+            return self._send_bytes(200, "text/plain; charset=us-ascii", ps_code.encode("ascii"), close_conn=True)
 
         if path == "/go.py":
             py_tpl = LIMB_PY_PATH.read_text("utf-8")
             py_code = py_tpl.replace("__DEFAULT_HUB_URL__", base)
-            return self._send_bytes(200, "text/x-python; charset=utf-8", py_code.encode("utf-8"))
+            return self._send_bytes(200, "text/x-python; charset=utf-8", py_code.encode("utf-8"), close_conn=True)
 
         # 2. OAuth 2.0 Discovery Metadata (`easy-mcp` Web AI Connector compatibility)
         if path == "/.well-known/oauth-protected-resource" or path.startswith("/.well-known/oauth-protected-resource/"):
@@ -723,7 +800,7 @@ class PortalRequestHandler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         qs = urllib.parse.parse_qs(parsed.query)
-        base = self.hub.base_url_for(self.headers.get("Host", ""))
+        base = self._req_base()
 
         # --- Southbound Classroom Limb Endpoints ---
         if path == "/limb/register":
@@ -1134,25 +1211,105 @@ def create_server(host: str = "127.0.0.1", port: int = 8787, public_url: str = "
     return httpd
 
 
+def _stop_by_pidfiles(pidfiles: list[str]) -> int:
+    my_pid = os.getpid()
+    stopped = []
+    for pf in pidfiles:
+        if not pf or not os.path.isfile(pf):
+            continue
+        try:
+            pid = int(Path(pf).read_text("utf-8").strip())
+        except Exception:
+            try:
+                os.remove(pf)
+            except OSError:
+                pass
+            continue
+        if pid > 1 and pid != my_pid:
+            try:
+                os.kill(pid, signal.SIGTERM)
+                stopped.append(f"{pid} ({pf})")
+            except ProcessLookupError:
+                pass
+            except Exception as e:
+                print(f"[WARN] Could not signal PID {pid} from {pf}: {e}", flush=True)
+        try:
+            os.remove(pf)
+        except OSError:
+            pass
+    if stopped:
+        print(f"[STOPPED] Cleanly terminated: {', '.join(stopped)}", flush=True)
+    else:
+        print("[STOPPED] No active pidfile processes found.", flush=True)
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description="Classroom Portal MCP Hub (5-tool MCP + OAuth 2.0 + 6-digit PIN gate)")
     ap.add_argument("--host", default=os.environ.get("PORTAL_HOST", "127.0.0.1"))
     ap.add_argument("--port", type=int, default=int(os.environ.get("PORTAL_PORT", "8787")))
-    ap.add_argument("--public-url", default=os.environ.get("PORTAL_PUBLIC_URL", ""), help="Public HTTPS base URL (e.g. https://portal.example.com)")
+    ap.add_argument(
+        "--public-url",
+        default=os.environ.get("PORTAL_PUBLIC_URL", "auto"),
+        help="Public HTTPS base URL, or 'auto' (default) to follow incoming Host / X-Forwarded-Host dynamically",
+    )
+    ap.add_argument(
+        "--pidfile",
+        default=os.environ.get("PORTAL_PIDFILE", "/tmp/classroom_portal_hub.pid"),
+        help="Path to write Hub PID for safe teardown without pkill self-kill (default: /tmp/classroom_portal_hub.pid)",
+    )
+    ap.add_argument(
+        "--tunnel-pidfile",
+        default=os.environ.get("PORTAL_TUNNEL_PIDFILE", "/tmp/classroom_portal_tunnel.pid"),
+        help="Optional tunnel PID file also cleaned up by --stop (default: /tmp/classroom_portal_tunnel.pid)",
+    )
+    ap.add_argument("--stop", action="store_true", help="Safely stop running Hub & tunnel via pidfiles (avoids pkill -f self-kill)")
     args = ap.parse_args()
 
-    srv = create_server(args.host, args.port, args.public_url)
-    base_disp = args.public_url.rstrip("/") or f"http://{args.host}:{args.port}"
-    print(f"[READY] Classroom Portal MCP Hub listening on http://{args.host}:{args.port}", flush=True)
+    if args.stop:
+        raise SystemExit(_stop_by_pidfiles([args.pidfile, args.tunnel_pidfile]))
+
+    try:
+        srv = create_server(args.host, args.port, args.public_url)
+    except OSError as e:
+        if e.errno in (errno.EADDRINUSE, 98, 48, 10048):
+            print(
+                f"[ERROR] Port {args.port} on {args.host} is already in use.\n"
+                f"  - To stop an existing Hub: python3 {Path(__file__).name} --stop\n"
+                f"  - Or pick another port   : python3 {Path(__file__).name} --port {args.port + 1}",
+                flush=True,
+            )
+            raise SystemExit(2)
+        raise
+
+    pid_written = False
+    if args.pidfile:
+        try:
+            Path(args.pidfile).parent.mkdir(parents=True, exist_ok=True)
+            Path(args.pidfile).write_text(f"{os.getpid()}\n", encoding="utf-8")
+            pid_written = True
+        except OSError:
+            pass
+
+    pub_clean = (args.public_url or "").strip().rstrip("/")
+    base_disp = pub_clean if (pub_clean and pub_clean.lower() != "auto") else "<https://your-tunnel-url>"
+    print(f"[READY] Classroom Portal MCP Hub listening on http://{args.host}:{args.port} (pid={os.getpid()}, public_url={args.public_url or 'auto'})", flush=True)
     print(f"  - Windows Classroom Win+R : powershell -NoP -Ep Bypass -c \"irm {base_disp}/go | iex\"", flush=True)
     print(f"  - POSIX Classroom One-Line: curl -fsSL {base_disp}/go.py | python3 -", flush=True)
     print(f"  - Web AI MCP Connector URL: {base_disp}/mcp (OAuth 2.0 gated by 6-digit PIN)", flush=True)
+    print(f"  - Safe Teardown           : python3 {Path(__file__).name} --stop", flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
         srv.server_close()
+        if pid_written and args.pidfile and os.path.isfile(args.pidfile):
+            try:
+                if Path(args.pidfile).read_text("utf-8").strip() == str(os.getpid()):
+                    os.remove(args.pidfile)
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":

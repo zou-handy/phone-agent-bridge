@@ -239,7 +239,60 @@ def main():
             ka_conn.close()
         print("[PASS 7] HTTP/1.1 Keep-Alive request-body drain verified (no {}POST desync)")
 
-        # 8. Disconnect classroom Limb -> room & token immediately wiped (0 residue!)
+        # 8. Verify Connection: close on /health & /go + seamless tunnel Host rotation without restart
+        st_h1, hdrs_h1, _ = req_raw(
+            f"{base}/health",
+            headers={"X-Forwarded-Host": "alpha-101.lhr.life", "X-Forwarded-Proto": "https"},
+        )
+        conn_hdr = (hdrs_h1.get("Connection") or hdrs_h1.get("connection") or "").lower()
+        assert st_h1 == 200 and conn_hdr == "close", f"Expected Connection: close on /health, got {hdrs_h1}"
+
+        st_r1, _, go_r1 = req_raw(
+            f"{base}/go",
+            headers={"X-Forwarded-Host": "alpha-101.lhr.life", "X-Forwarded-Proto": "https"},
+        )
+        assert st_r1 == 200 and b"https://alpha-101.lhr.life" in go_r1
+
+        st_r2, _, go_r2 = req_raw(
+            f"{base}/go",
+            headers={"X-Forwarded-Host": "bravo-202.lhr.life", "X-Forwarded-Proto": "https"},
+        )
+        assert st_r2 == 200 and b"https://bravo-202.lhr.life" in go_r2
+        print("[PASS 8] Connection: close + dynamic tunnel Host rotation verified")
+
+        # 9. Friendly port-conflict check + --pidfile / --stop lifecycle
+        dup = subprocess.run(
+            [sys.executable, str(BASE_DIR / "hub_server.py"), "--host", "127.0.0.1", "--port", str(port)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        dup_out = (dup.stdout or "") + (dup.stderr or "")
+        assert dup.returncode == 2 and "already in use" in dup_out and "Traceback" not in dup_out, dup_out
+
+        pid_file = work_dir / "hub_test.pid"
+        sub_hub = subprocess.Popen(
+            [sys.executable, str(BASE_DIR / "hub_server.py"), "--host", "127.0.0.1", "--port", "0", "--pidfile", str(pid_file)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        for _ in range(30):
+            if pid_file.is_file():
+                break
+            time.sleep(0.1)
+        assert pid_file.is_file(), "pidfile was not created"
+        stop_run = subprocess.run(
+            [sys.executable, str(BASE_DIR / "hub_server.py"), "--stop", "--pidfile", str(pid_file), "--tunnel-pidfile", str(work_dir / "none.pid")],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert stop_run.returncode == 0
+        sub_hub.wait(timeout=5)
+        assert not pid_file.exists(), "pidfile was not removed after --stop"
+        print("[PASS 9] Friendly port-in-use guard + --pidfile / --stop lifecycle verified")
+
+        # 10. Disconnect classroom Limb -> room & token immediately wiped (0 residue!)
         limb_proc.terminate()
         limb_proc.wait(timeout=5)
         time.sleep(0.2)
@@ -250,7 +303,7 @@ def main():
             headers=mcp_hdrs,
         )
         assert st_after == 401, f"Expected 401 after Limb window close, got {st_after}"
-        print("[PASS 8] Instant room & token self-destruct on window close verified (0 residue)")
+        print("[PASS 10] Instant room & token self-destruct on window close verified (0 residue)")
         print("ALL_E2E_TESTS_PASSED")
     finally:
         if limb_proc.poll() is None:
