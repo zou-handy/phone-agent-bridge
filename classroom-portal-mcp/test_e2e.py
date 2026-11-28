@@ -268,7 +268,29 @@ def main():
             headers={"X-Forwarded-Host": "bravo-202.lhr.life", "X-Forwarded-Proto": "https"},
         )
         assert st_r2 == 200 and b"https://bravo-202.lhr.life" in go_r2
-        print("[PASS 8] Connection: close + dynamic tunnel Host rotation verified")
+
+        # Host-header injection & untrusted Host cache-poisoning regression guards
+        st_inj, _, go_inj = req_raw(
+            f"{base}/go",
+            headers={"X-Forwarded-Host": 'evil.com"; Start-Process calc.exe; #', "X-Forwarded-Proto": "https"},
+        )
+        assert st_inj == 200 and b"calc.exe" not in go_inj and b"evil.com" not in go_inj, "Host-header injection leaked into /go!"
+        _, _, go_untrusted = req_raw(
+            f"{base}/health",
+            headers={"X-Forwarded-Host": "spoofed-scanner.example.org", "X-Forwarded-Proto": "https"},
+        )
+        _, _, go_local_after = req_raw(f"{base}/go")
+        assert b"spoofed-scanner.example.org" not in go_local_after, "Untrusted Host poisoned last_seen_public_url!"
+
+        # Tunnel-proxied POST /pair must be blocked by default (403), while local loopback POST /pair remains allowed
+        st_ext_pair, _, _ = req_raw(
+            f"{base}/pair",
+            method="POST",
+            data=b'{"pin":"000000"}',
+            headers={"Content-Type": "application/json", "X-Forwarded-For": "203.0.113.42"},
+        )
+        assert st_ext_pair == 403, f"Expected 403 on proxied POST /pair, got {st_ext_pair}"
+        print("[PASS 8] Connection: close + dynamic tunnel Host rotation + Host-injection & loopback /pair guards verified")
 
         # 9. Friendly port-conflict check + --pidfile / --stop lifecycle
         dup = subprocess.run(

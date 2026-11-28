@@ -19,6 +19,7 @@ import hmac
 import html
 import json
 import os
+import re
 import secrets
 import signal
 import threading
@@ -35,6 +36,20 @@ MAX_FILE_BYTES = 64 * 1024 * 1024
 ROOM_IDLE_TTL_SEC = 120.0
 POLL_WAIT_SEC = 25.0
 MAX_PIN_STRIKES = 5
+MAX_ACTIVE_ROOMS = 32
+_VALID_HOST_RE = re.compile(
+    r"^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*|\[[0-9a-fA-F:]+\])(?::\d{1,5})?$"
+)
+_TRUSTED_TUNNEL_SUFFIXES = (
+    ".lhr.life",
+    ".localhost.run",
+    ".trycloudflare.com",
+    ".pinggy.link",
+    ".pinggy.io",
+    ".workers.dev",
+    ".ngrok-free.app",
+    ".ngrok.io",
+)
 
 BASE_DIR = Path(__file__).resolve().parent
 LIMB_PS1_PATH = BASE_DIR / "limb" / "classroom_limb.ps1"
@@ -171,11 +186,12 @@ def _valid_redirect_uri(uri: str) -> bool:
 class HubState:
     """In-memory ephemeral state for rooms, OAuth clients, auth codes, and scoped tokens (0 disk residue)."""
 
-    def __init__(self, public_base_url: str = ""):
+    def __init__(self, public_base_url: str = "", allow_remote_pair: bool = False):
         self.lock = threading.RLock()
         self.cond = threading.Condition(self.lock)
         cleaned = (public_base_url or "").strip().rstrip("/")
         self.public_base_url = "" if cleaned.lower() == "auto" else cleaned
+        self.allow_remote_pair = bool(allow_remote_pair)
         self.last_seen_public_url = ""
         self.csrf_key = secrets.token_hex(32)
 
@@ -199,16 +215,30 @@ class HubState:
             h_only = h.split(":")[0]
         return h_only in ("127.0.0.1", "localhost", "[::1]", "::1", "0.0.0.0")
 
+    @staticmethod
+    def _sanitize_host(candidate: str) -> str:
+        h = (candidate or "").split(",")[0].strip()
+        if not h or len(h) > 253:
+            return ""
+        return h if _VALID_HOST_RE.fullmatch(h) else ""
+
+    @staticmethod
+    def _is_trusted_tunnel_host(host: str) -> bool:
+        h_only = (host or "").split(":")[0].strip().lower()
+        return any(h_only.endswith(sfx) for sfx in _TRUSTED_TUNNEL_SUFFIXES)
+
     def base_url_for(self, host_header: str, x_forwarded_host: str = "", x_forwarded_proto: str = "") -> str:
-        xfh = (x_forwarded_host or "").split(",")[0].strip()
-        raw_host = xfh or (host_header or "").split(",")[0].strip()
+        xfh = self._sanitize_host(x_forwarded_host)
+        hh = self._sanitize_host(host_header)
+        raw_host = xfh or hh
         xfp = (x_forwarded_proto or "").split(",")[0].strip().lower()
 
         if raw_host and not self._is_local_host(raw_host):
             scheme = xfp if xfp in ("https", "http") else "https"
             live_url = f"{scheme}://{raw_host}"
-            with self.lock:
-                self.last_seen_public_url = live_url
+            if self._is_trusted_tunnel_host(raw_host):
+                with self.lock:
+                    self.last_seen_public_url = live_url
             if not self.public_base_url:
                 return live_url
             # Seamlessly follow rotating ephemeral tunnel hostnames (localhost.run / trycloudflare / pinggy)
@@ -284,6 +314,15 @@ class HubState:
     def register_limb(self, hostname: str, os_info: str, default_cwd: str) -> dict:
         with self.lock:
             self.gc_locked()
+            if len(self.rooms) >= MAX_ACTIVE_ROOMS:
+                unpaired = sorted(
+                    (r for r in self.rooms.values() if r.get("paired_count", 0) == 0),
+                    key=lambda r: r["created_at"],
+                )
+                if unpaired:
+                    self._destroy_room_locked(unpaired[0]["room_id"])
+                else:
+                    raise OverflowError("Too many active paired rooms")
             room_id = "rm_" + secrets.token_hex(8)
             limb_secret = "ls_" + secrets.token_urlsafe(24)
             limb_hash = _sha256_hex(limb_secret)
@@ -569,8 +608,22 @@ class PortalRequestHandler(BaseHTTPRequestHandler):
         print(f"[{self.log_date_time_string()}] {self.command} {raw_path}", flush=True)
 
     def _client_ip(self) -> str:
-        xff = (self.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
-        return xff or (self.client_address[0] if self.client_address else "unknown")
+        cf_ip = (self.headers.get("CF-Connecting-IP") or "").strip()
+        if cf_ip:
+            return cf_ip
+        xff = (self.headers.get("X-Forwarded-For") or "").strip()
+        if xff:
+            return xff.split(",")[-1].strip()
+        return self.client_address[0] if self.client_address else "unknown"
+
+    def _is_direct_loopback(self) -> bool:
+        peer = (self.client_address[0] if self.client_address else "").strip().lower()
+        if peer not in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+            return False
+        for proxy_hdr in ("X-Forwarded-For", "X-Forwarded-Host", "CF-Connecting-IP", "X-Real-IP", "Forwarded"):
+            if (self.headers.get(proxy_hdr) or "").strip():
+                return False
+        return True
 
     def _set_cors(self, path: str):
         if path == "/mcp" or path.startswith("/mcp/") or path.startswith("/.well-known/") or path.startswith("/files/"):
@@ -808,11 +861,14 @@ class PortalRequestHandler(BaseHTTPRequestHandler):
                 data = json.loads(self._read_body(65536).decode("utf-8") or "{}")
             except Exception as e:
                 return self._send_json(400, {"ok": False, "error": str(e)})
-            reg = self.hub.register_limb(
-                data.get("hostname", "Classroom-PC"),
-                data.get("os_info", "Windows"),
-                data.get("default_cwd", "D:\\"),
-            )
+            try:
+                reg = self.hub.register_limb(
+                    data.get("hostname", "Classroom-PC"),
+                    data.get("os_info", "Windows"),
+                    data.get("default_cwd", "D:\\"),
+                )
+            except OverflowError as e:
+                return self._send_json(429, {"ok": False, "error": str(e)})
             reg["ok"] = True
             reg["mcp_endpoint"] = f"{base}/mcp"
             return self._send_json(200, reg)
@@ -841,6 +897,15 @@ class PortalRequestHandler(BaseHTTPRequestHandler):
 
         # --- CLI / Mobile Direct 6-Digit PIN Pairing (`POST /pair`) ---
         if path == "/pair":
+            if not self.hub.allow_remote_pair and not self._is_direct_loopback():
+                self._read_body(16384)
+                return self._send_json(
+                    403,
+                    {
+                        "ok": False,
+                        "error": "POST /pair is restricted to local loopback (127.0.0.1); remote clients must use OAuth 2.0 /oauth/authorize.",
+                    },
+                )
             try:
                 data = json.loads(self._read_body(16384).decode("utf-8") or "{}")
             except Exception:
@@ -1208,8 +1273,13 @@ class PortalRequestHandler(BaseHTTPRequestHandler):
             return self._send_json(500, {"ok": False, "error": str(e)}, path_for_cors=path)
 
 
-def create_server(host: str = "127.0.0.1", port: int = 8787, public_url: str = "") -> ThreadingHTTPServer:
-    hub = HubState(public_base_url=public_url)
+def create_server(
+    host: str = "127.0.0.1",
+    port: int = 8787,
+    public_url: str = "",
+    allow_remote_pair: bool = False,
+) -> ThreadingHTTPServer:
+    hub = HubState(public_base_url=public_url, allow_remote_pair=allow_remote_pair)
 
     class BoundHandler(PortalRequestHandler):
         pass
@@ -1273,13 +1343,18 @@ def main():
         help="Optional tunnel PID file also cleaned up by --stop (default: /tmp/classroom_portal_tunnel.pid)",
     )
     ap.add_argument("--stop", action="store_true", help="Safely stop running Hub & tunnel via pidfiles (avoids pkill -f self-kill)")
+    ap.add_argument(
+        "--allow-remote-pair",
+        action="store_true",
+        help="Allow POST /pair through reverse proxies (disabled by default; remote Web clients use OAuth 2.0 /oauth/authorize)",
+    )
     args = ap.parse_args()
 
     if args.stop:
         raise SystemExit(_stop_by_pidfiles([args.pidfile, args.tunnel_pidfile]))
 
     try:
-        srv = create_server(args.host, args.port, args.public_url)
+        srv = create_server(args.host, args.port, args.public_url, allow_remote_pair=args.allow_remote_pair)
     except OSError as e:
         if e.errno in (errno.EADDRINUSE, 98, 48, 10048):
             print(
