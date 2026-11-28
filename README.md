@@ -2,6 +2,7 @@
 
 > **不装软件、不登账号、不用公网 IP：敲一条命令让教室公用电脑变成「听令干活、关窗失忆」的临时外肢——同时支持「手机豆包（工作模式）/ WorkBuddy / Claude Code `:443` 六位配对码免线接管」与「充电线 `10ms` 离线回环直连」**
 
+[![Bilibili Demo](https://img.shields.io/badge/B站80秒真机实测-BV1sB1Tz8Ez1%20(点击在线播放)-fb7299?style=flat-square&logo=bilibili&logoColor=white)](https://www.bilibili.com/video/BV1sB1Tz8Ez1)
 [![Release v1.0.0](https://img.shields.io/badge/Release-v1.0.0%20(3.9MB%20Ready--to--Use%20Zip)-16a34a?style=flat-square)](https://github.com/zou-handy/phone-agent-bridge/releases/tag/v1.0.0)
 [![License: MIT](https://img.shields.io/badge/License-MIT-2563eb?style=flat-square)](LICENSE)
 [![Agents](https://img.shields.io/badge/Agents-豆包工作模式%20%7C%20WorkBuddy%20%7C%20Claude%20Code%20%7C%20Operit%20%7C%20DSH--Go%20%7C%20AGY-7c3aed?style=flat-square)](#)
@@ -10,6 +11,8 @@
 ---
 
 ## 零、免数据线主打：一条命令 + 一次性 6 位配对码远程接管电脑 (`classroom-portal-mcp/`)
+
+- 🎬 **80 秒真机实测视频（B 站在线直看，免下载）：[不装软件不登账号，敲一行命令用手机 AI 接管教室公用电脑！（BV1sB1Tz8Ez1）](https://www.bilibili.com/video/BV1sB1Tz8Ez1)**
 
 专为**大学生上机实验课 / 借用教室公用电脑**设计：不想背五斤电脑，但公用机镜像老旧每次重启还原都得挤在校园慢网重新更新客户端，扫码怕留登录态，而且**公用机上的本地会话带不走、一下课离开教室对话就断了没法接着聊**？
 
