@@ -11,9 +11,9 @@
 
 ## 零、免数据线主打：一条命令 + 一次性 6 位配对码远程接管电脑 (`classroom-portal-mcp/`)
 
-专为**大学生上机实验课 / 借用教室公用电脑**设计：不想背五斤电脑，又不敢在公用机装远控、扫码留微信/GitHub 登录态？
+专为**大学生上机实验课 / 借用教室公用电脑**设计：不想背五斤电脑，但公用机镜像老旧每次重启还原都得挤在校园慢网重新更新客户端，扫码怕留登录态，而且**公用机上的本地会话带不走、一下课离开教室对话就断了没法接着聊**？
 
-- **纯内存零残留**：被控电脑按 `Win + R` 运行一行 PowerShell 命令（`irm https://.../go | iex`），脚本纯内存驻留、不落盘任何文件、不触发 UAC 或防火墙弹窗，当场弹出**一次性 6 位配对码**；下课关掉黑框，房间与令牌瞬间销毁（`HTTP 401`）。
+- **纯内存零残留 + 走出教室会话不断线**：被控电脑按 `Win + R` 运行一行 PowerShell 命令（`irm https://.../go | iex`），15KB 脚本纯内存驻留、0 安装 0 更新负担、不触发 UAC 或防火墙弹窗，当场弹出**一次性 6 位配对码**；主力 AI 与完整聊天上下文始终留在你自己的手机或电脑里——下课关掉黑框，公用机房间与令牌瞬间销毁（`HTTP 401`），人走出教室对话照样无缝接着聊。
 - **一机一码同时多控 + 自有短域名**：内置多房间隔离（`rooms`），每台电脑敲一行命令各领独立配对码，一个 AI 可同时调度多台 Windows / Mac / Linux；支持 `$0` 免域名隧道（`localhost.run` / `cloudflared`），也提供 [`cloudflare/worker.js`](classroom-portal-mcp/cloudflare/worker.js) 绑定自有短域名 24h 常驻。
 - **自带上机课实战 [`SKILL.md`](classroom-portal-mcp/SKILL.md)（防抢鼠标 + 防还原 + 锁固定比例 Computer Use）**：AI 自动习得后台命令行静默执行（`0%` 抢鼠标）、自动写 `D:\` 防 C 盘影子还原、`Get-Content -Encoding UTF8 -LiteralPath` 零乱码，以及操作桌面软件（如数据库 IDE）前先按 `restore -> moveTo -> resizeTo` 锁死固定窗口比例再做 `Computer Use` 精准点击，不怕点歪（踩坑全集见 [`WINDOWS_VDI_PITFALLS.md`](classroom-portal-mcp/WINDOWS_VDI_PITFALLS.md)）。
 
